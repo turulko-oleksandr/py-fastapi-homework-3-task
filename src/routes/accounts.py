@@ -1,10 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from passlib.context import CryptContext
-from jose import jwt, JWTError
 from config import settings, get_settings
 from database import (
     UserModel,
@@ -27,6 +26,10 @@ from schemas.accounts import (
     UserActivationRequestSchema,
     MessageResponseSchema,
 )
+from security.interfaces import JWTAuthManagerInterface
+from exceptions import TokenExpiredError, InvalidTokenError
+
+from config.dependencies import get_jwt_auth_manager
 
 router = APIRouter(tags=["Accounts"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -38,13 +41,6 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
-
-
-def create_token(data: dict, expires_delta: timedelta, secret_key: str, algorithm: str) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + expires_delta
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, secret_key, algorithm=algorithm)
 
 
 def validate_password(password: str):
@@ -66,9 +62,10 @@ def validate_password(password: str):
 
 @router.post("/register/", status_code=201)
 async def register_user(
-    payload: UserRegistrationRequestSchema,
-    db: AsyncSession = Depends(get_db),
-    settings: settings = Depends(get_settings)
+        payload: UserRegistrationRequestSchema,
+        db: AsyncSession = Depends(get_db),
+        settings=Depends(get_settings),
+        jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     validate_password(payload.password)
 
@@ -105,12 +102,11 @@ async def register_user(
         await db.rollback()
         raise HTTPException(status_code=500, detail="An error occurred during user creation.")
 
-    token_value = create_token(
+    token_value = jwt_manager.create_access_token(
         {"user_id": new_user.id},
-        timedelta(minutes=30),
-        settings.SECRET_KEY_ACCESS,
-        settings.JWT_SIGNING_ALGORITHM
+        timedelta(minutes=30)
     )
+
     activation_token = ActivationTokenModel(
         user_id=new_user.id,
         token=token_value,
@@ -124,8 +120,8 @@ async def register_user(
 
 @router.post("/activate/", response_model=MessageResponseSchema)
 async def activate_user(
-    payload: UserActivationRequestSchema,
-    db: AsyncSession = Depends(get_db)
+        payload: UserActivationRequestSchema,
+        db: AsyncSession = Depends(get_db)
 ):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
@@ -154,15 +150,17 @@ async def activate_user(
     user.is_active = True
     await db.delete(token)
     await db.commit()
+    await db.refresh(user)
 
     return {"message": "User account activated successfully."}
 
 
 @router.post("/login/", response_model=UserLoginResponseSchema, status_code=201)
 async def login_user(
-    payload: UserLoginRequestSchema,
-    db: AsyncSession = Depends(get_db),
-    settings: settings = Depends(get_settings)
+        payload: UserLoginRequestSchema,
+        db: AsyncSession = Depends(get_db),
+        settings=Depends(get_settings),
+        jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
@@ -174,17 +172,14 @@ async def login_user(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is not activated.")
 
-    access_token = create_token(
+    access_token = jwt_manager.create_access_token(
         {"user_id": user.id},
-        timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        settings.SECRET_KEY_ACCESS,
-        settings.JWT_SIGNING_ALGORITHM
+        timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    refresh_token_value = create_token(
+
+    refresh_token_value = jwt_manager.create_refresh_token(
         {"user_id": user.id},
-        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-        settings.SECRET_KEY_REFRESH,
-        settings.JWT_SIGNING_ALGORITHM
+        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     )
 
     refresh_token = RefreshTokenModel(
@@ -205,19 +200,18 @@ async def login_user(
 
 @router.post("/refresh/", response_model=TokenRefreshResponseSchema)
 async def refresh_access_token(
-    payload: TokenRefreshRequestSchema,
-    db: AsyncSession = Depends(get_db),
-    settings: settings = Depends(get_settings)
+        payload: TokenRefreshRequestSchema,
+        db: AsyncSession = Depends(get_db),
+        settings=Depends(get_settings),
+        jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     try:
-        decoded = jwt.decode(
-            payload.refresh_token,
-            settings.SECRET_KEY_REFRESH,
-            algorithms=[settings.JWT_SIGNING_ALGORITHM]
-        )
+        decoded = jwt_manager.decode_refresh_token(payload.refresh_token)
         user_id = decoded.get("user_id")
-    except JWTError:
+    except TokenExpiredError:
         raise HTTPException(status_code=400, detail="Token has expired.")
+    except InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token.")
 
     stmt_token = select(RefreshTokenModel).where(RefreshTokenModel.token == payload.refresh_token)
     result_token = await db.execute(stmt_token)
@@ -233,11 +227,9 @@ async def refresh_access_token(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    new_access_token = create_token(
+    new_access_token = jwt_manager.create_access_token(
         {"user_id": user.id},
-        timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        settings.SECRET_KEY_ACCESS,
-        settings.JWT_SIGNING_ALGORITHM
+        timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
 
     return {"access_token": new_access_token, "refresh_token": payload.refresh_token}
@@ -245,9 +237,9 @@ async def refresh_access_token(
 
 @router.post("/password-reset/request/", response_model=MessageResponseSchema, status_code=200)
 async def request_password_reset(
-    payload: PasswordResetRequestSchema,
-    db: AsyncSession = Depends(get_db),
-    settings: settings = Depends(get_settings)
+        payload: PasswordResetRequestSchema,
+        db: AsyncSession = Depends(get_db),
+        jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
@@ -256,12 +248,14 @@ async def request_password_reset(
     if not user or not user.is_active:
         return {"message": "If you are registered, you will receive an email with instructions."}
 
-    token_value = create_token(
+    delete_stmt = delete(PasswordResetTokenModel).where(PasswordResetTokenModel.user_id == user.id)
+    await db.execute(delete_stmt)
+
+    token_value = jwt_manager.create_access_token(
         {"user_id": user.id},
-        timedelta(minutes=15),
-        settings.SECRET_KEY_ACCESS,
-        settings.JWT_SIGNING_ALGORITHM
+        timedelta(minutes=15)
     )
+
     reset_token = PasswordResetTokenModel(
         user_id=user.id,
         token=token_value,
@@ -273,16 +267,19 @@ async def request_password_reset(
     return {"message": "If you are registered, you will receive an email with instructions."}
 
 
-@router.post("/reset-password/complete/", response_model=MessageResponseSchema)
+@router.post("/reset-password/complete/", response_model=MessageResponseSchema, status_code=200)
 async def complete_password_reset(
-    payload: PasswordResetCompleteRequestSchema,
-    db: AsyncSession = Depends(get_db)
+        payload: PasswordResetCompleteRequestSchema,
+        db: AsyncSession = Depends(get_db)
 ):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
     user = result.scalars().first()
 
     if not user:
+        raise HTTPException(status_code=400, detail="Invalid email or token.")
+
+    if not user.is_active:
         raise HTTPException(status_code=400, detail="Invalid email or token.")
 
     stmt_token = select(PasswordResetTokenModel).where(PasswordResetTokenModel.user_id == user.id)
@@ -293,6 +290,7 @@ async def complete_password_reset(
         if token_record:
             await db.delete(token_record)
             await db.commit()
+            await db.refresh(user)
         raise HTTPException(status_code=400, detail="Invalid email or token.")
 
     token_expires = token_record.expires_at
@@ -302,10 +300,13 @@ async def complete_password_reset(
     if token_expires < datetime.now(timezone.utc):
         await db.delete(token_record)
         await db.commit()
+        await db.refresh(user)
         raise HTTPException(status_code=400, detail="Invalid email or token.")
 
+    validate_password(payload.password)
+
     user._hashed_password = hash_password(payload.password)
-    await db.delete(token_record)
+    db.delete(token_record)
 
     try:
         await db.commit()
