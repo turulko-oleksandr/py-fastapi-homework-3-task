@@ -1,13 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from passlib.context import CryptContext
 from jose import jwt, JWTError
-
-from config import get_settings
-from database.session_sqlite import get_sqlite_db
+from config import settings, get_settings
 from database import (
     UserModel,
     ActivationTokenModel,
@@ -16,6 +14,7 @@ from database import (
     UserGroupModel,
     UserGroupEnum,
 )
+from database import get_db
 from schemas.accounts import (
     UserRegistrationRequestSchema,
     UserRegistrationResponseSchema,
@@ -30,7 +29,6 @@ from schemas.accounts import (
 )
 
 router = APIRouter(tags=["Accounts"])
-settings = get_settings()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -42,11 +40,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
-def create_token(data: dict, expires_delta: timedelta, secret_key: str) -> str:
+def create_token(data: dict, expires_delta: timedelta, secret_key: str, algorithm: str) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + expires_delta
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, secret_key, algorithm=settings.JWT_SIGNING_ALGORITHM)
+    return jwt.encode(to_encode, secret_key, algorithm=algorithm)
 
 
 def validate_password(password: str):
@@ -67,7 +65,11 @@ def validate_password(password: str):
 
 
 @router.post("/register/", status_code=201)
-async def register_user(payload: UserRegistrationRequestSchema, db: AsyncSession = Depends(get_sqlite_db)):
+async def register_user(
+    payload: UserRegistrationRequestSchema,
+    db: AsyncSession = Depends(get_db),
+    settings: settings = Depends(get_settings)
+):
     validate_password(payload.password)
 
     stmt = select(UserModel).where(UserModel.email == payload.email)
@@ -106,7 +108,8 @@ async def register_user(payload: UserRegistrationRequestSchema, db: AsyncSession
     token_value = create_token(
         {"user_id": new_user.id},
         timedelta(minutes=30),
-        settings.SECRET_KEY_ACCESS
+        settings.SECRET_KEY_ACCESS,
+        settings.JWT_SIGNING_ALGORITHM
     )
     activation_token = ActivationTokenModel(
         user_id=new_user.id,
@@ -120,7 +123,10 @@ async def register_user(payload: UserRegistrationRequestSchema, db: AsyncSession
 
 
 @router.post("/activate/", response_model=MessageResponseSchema)
-async def activate_user(payload: UserActivationRequestSchema, db: AsyncSession = Depends(get_sqlite_db)):
+async def activate_user(
+    payload: UserActivationRequestSchema,
+    db: AsyncSession = Depends(get_db)
+):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
     user = result.scalars().first()
@@ -153,7 +159,11 @@ async def activate_user(payload: UserActivationRequestSchema, db: AsyncSession =
 
 
 @router.post("/login/", response_model=UserLoginResponseSchema, status_code=201)
-async def login_user(payload: UserLoginRequestSchema, db: AsyncSession = Depends(get_sqlite_db)):
+async def login_user(
+    payload: UserLoginRequestSchema,
+    db: AsyncSession = Depends(get_db),
+    settings: settings = Depends(get_settings)
+):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
     user = result.scalars().first()
@@ -167,12 +177,14 @@ async def login_user(payload: UserLoginRequestSchema, db: AsyncSession = Depends
     access_token = create_token(
         {"user_id": user.id},
         timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        settings.SECRET_KEY_ACCESS
+        settings.SECRET_KEY_ACCESS,
+        settings.JWT_SIGNING_ALGORITHM
     )
     refresh_token_value = create_token(
         {"user_id": user.id},
         timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-        settings.SECRET_KEY_REFRESH
+        settings.SECRET_KEY_REFRESH,
+        settings.JWT_SIGNING_ALGORITHM
     )
 
     refresh_token = RefreshTokenModel(
@@ -192,7 +204,11 @@ async def login_user(payload: UserLoginRequestSchema, db: AsyncSession = Depends
 
 
 @router.post("/refresh/", response_model=TokenRefreshResponseSchema)
-async def refresh_access_token(payload: TokenRefreshRequestSchema, db: AsyncSession = Depends(get_sqlite_db)):
+async def refresh_access_token(
+    payload: TokenRefreshRequestSchema,
+    db: AsyncSession = Depends(get_db),
+    settings: settings = Depends(get_settings)
+):
     try:
         decoded = jwt.decode(
             payload.refresh_token,
@@ -220,14 +236,19 @@ async def refresh_access_token(payload: TokenRefreshRequestSchema, db: AsyncSess
     new_access_token = create_token(
         {"user_id": user.id},
         timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        settings.SECRET_KEY_ACCESS
+        settings.SECRET_KEY_ACCESS,
+        settings.JWT_SIGNING_ALGORITHM
     )
 
     return {"access_token": new_access_token, "refresh_token": payload.refresh_token}
 
 
 @router.post("/password-reset/request/", response_model=MessageResponseSchema, status_code=200)
-async def request_password_reset(payload: PasswordResetRequestSchema, db: AsyncSession = Depends(get_sqlite_db)):
+async def request_password_reset(
+    payload: PasswordResetRequestSchema,
+    db: AsyncSession = Depends(get_db),
+    settings: settings = Depends(get_settings)
+):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)
     user = result.scalars().first()
@@ -238,7 +259,8 @@ async def request_password_reset(payload: PasswordResetRequestSchema, db: AsyncS
     token_value = create_token(
         {"user_id": user.id},
         timedelta(minutes=15),
-        settings.SECRET_KEY_ACCESS
+        settings.SECRET_KEY_ACCESS,
+        settings.JWT_SIGNING_ALGORITHM
     )
     reset_token = PasswordResetTokenModel(
         user_id=user.id,
@@ -253,8 +275,8 @@ async def request_password_reset(payload: PasswordResetRequestSchema, db: AsyncS
 
 @router.post("/reset-password/complete/", response_model=MessageResponseSchema)
 async def complete_password_reset(
-        payload: PasswordResetCompleteRequestSchema,
-        db: AsyncSession = Depends(get_sqlite_db)
+    payload: PasswordResetCompleteRequestSchema,
+    db: AsyncSession = Depends(get_db)
 ):
     stmt = select(UserModel).where(UserModel.email == payload.email)
     result = await db.execute(stmt)

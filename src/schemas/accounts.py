@@ -3,7 +3,7 @@ from pydantic import BaseModel, EmailStr, Field, constr
 
 class UserRegistrationRequestSchema(BaseModel):
     email: EmailStr
-    password: str
+    password: str | constr(min_length=8)
 
 
 class UserRegistrationResponseSchema(BaseModel):
@@ -32,12 +32,13 @@ class PasswordResetRequestSchema(BaseModel):
 class PasswordResetCompleteRequestSchema(BaseModel):
     email: EmailStr
     token: str
-    password: str
+    password: str | constr(min_length=8)
 
 
 class UserLoginResponseSchema(BaseModel):
     access_token: str
     refresh_token: str
+    token_type: str = "bearer"
 
 
 class TokenRefreshResponseSchema(BaseModel):
