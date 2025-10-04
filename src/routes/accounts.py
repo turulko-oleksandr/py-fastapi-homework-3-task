@@ -4,7 +4,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from passlib.context import CryptContext
-from config import settings, get_settings
+from config import get_settings
 from database import (
     UserModel,
     ActivationTokenModel,
@@ -201,7 +201,7 @@ async def login_user(
 async def refresh_access_token(
         payload: TokenRefreshRequestSchema,
         db: AsyncSession = Depends(get_db),
-        settings = Depends(get_settings),
+        settings=Depends(get_settings),
         jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     try:
