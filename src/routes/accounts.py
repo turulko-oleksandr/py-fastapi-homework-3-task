@@ -201,6 +201,7 @@ async def login_user(
 async def refresh_access_token(
         payload: TokenRefreshRequestSchema,
         db: AsyncSession = Depends(get_db),
+        settings =Depends(get_settings),
         jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager)
 ):
     try:
@@ -304,7 +305,7 @@ async def complete_password_reset(
     validate_password(payload.password)
 
     user._hashed_password = hash_password(payload.password)
-    db.delete(token_record)
+    await db.delete(token_record)
 
     try:
         await db.commit()

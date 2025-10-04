@@ -20,7 +20,6 @@ class Settings(BaseAppSettings):
     POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "test_host")
     POSTGRES_DB_PORT: int = int(os.getenv("POSTGRES_DB_PORT", 5432))
     POSTGRES_DB: str = os.getenv("POSTGRES_DB", "test_db")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     SECRET_KEY_ACCESS: str = os.getenv("SECRET_KEY_ACCESS", os.urandom(32))
     SECRET_KEY_REFRESH: str = os.getenv("SECRET_KEY_REFRESH", os.urandom(32))
@@ -28,7 +27,6 @@ class Settings(BaseAppSettings):
 
 
 class TestingSettings(BaseAppSettings):
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     SECRET_KEY_ACCESS: str = "SECRET_KEY_ACCESS"
     SECRET_KEY_REFRESH: str = "SECRET_KEY_REFRESH"
     JWT_SIGNING_ALGORITHM: str = "HS256"
